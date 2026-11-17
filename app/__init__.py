@@ -1,0 +1,1 @@
+"""Stockroom application package."""
