@@ -43,3 +43,27 @@
 - Started the Docker Compose stack successfully using its Python 3.12 API container and PostgreSQL 16 service.
 - Verified `GET /health` returned `{"status":"ok","database":"ok"}`.
 - Verified PostgreSQL readiness with `pg_isready` and a `SELECT 1` query inside the database container.
+
+### Phase 1 - database models and migrations - 2026-11-18
+
+- Added typed SQLAlchemy 2 models for Product, Warehouse, StockLevel, Hold, Order, and SyncRun.
+- Added the initial reversible Alembic migration, `20261118_0001_create_inventory_schema`.
+- Enforced the stock invariant in PostgreSQL with `held + sold <= on_hand`, non-negative counters, unique product/warehouse stock rows, positive hold/order quantities, and composite hold/order allocation foreign keys.
+- Added model metadata tests for model registration and the inventory constraint.
+- The first real migration attempt failed because the migration manually created the PostgreSQL enum and SQLAlchemy then attempted to create it again for the `holds` table. PostgreSQL rolled the transaction back. Removed the duplicate manual enum creation and reran the migration successfully.
+- Ran `ruff check .`: passed.
+- Ran `mypy app`: passed with no issues.
+- Ran `pytest`: 4 passed; one Starlette/HTTPX deprecation warning from `fastapi.testclient`.
+- Rebuilt the Python 3.12 API container and verified Alembic upgrade, downgrade to base, and re-upgrade on PostgreSQL 16. The final revision is `20261118_0001 (head)`.
+
+### Phase 2 - DummyJSON catalogue synchronization - 2026-11-18
+
+- Added a typed HTTPX DummyJSON client that uses `limit`/`skip` pagination, configurable timeout/page-size/retry settings, and exponential backoff for transport failures and 5xx responses.
+- Added `SupplierSyncService`, which records `SyncRun` results, upserts products by supplier ID, converts supplier prices to integer cents, and skips unchanged product writes.
+- Used a nested transaction for each product so invalid source data or an individual persistence failure is recorded without stopping remaining products.
+- Added `POST /sync/products` and `scripts/sync_products.py`; both call the same service. Supplier stock is intentionally not assigned yet because two-warehouse distribution is the next phase.
+- Added tests for pagination, retrying a transient server failure, product upsert idempotency, and continuing after an invalid product.
+- Ran `ruff check .`: passed.
+- Ran `mypy app`: passed with no issues.
+- Ran `pytest`: 8 passed; one Starlette/HTTPX deprecation warning from `fastapi.testclient`.
+- Rebuilt the Python 3.12 API container. Real `POST /sync/products` created 194 products with zero errors; an immediate second run created and updated zero products. The CLI was also run successfully and created/updated zero products.

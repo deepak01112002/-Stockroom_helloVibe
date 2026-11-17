@@ -4,22 +4,42 @@ Stockroom is a warehouse inventory reservation service built for the HelloVibe B
 
 ## Current milestone
 
-The initial setup establishes the Python 3.12/FastAPI project, Pydantic Settings configuration, SQLAlchemy 2 session plumbing, Alembic configuration, PostgreSQL Docker Compose service, JSON logging, and a database-backed health endpoint. Business models and inventory workflows are intentionally deferred.
+The service now has the Python 3.12/FastAPI foundation, inventory persistence schema, and a DummyJSON catalogue synchronization endpoint. Warehouse stock distribution and shopper inventory workflows remain deferred.
 
 ## Run locally
 
-1. Copy `.env.example` to `.env` and set a non-default local webhook secret.
+1. Copy `.env.example` to `.env` if you need to override local settings.
 2. Run `docker compose up --build`.
 3. Open `http://localhost:8000/docs` and call `GET /health`.
 
-The API container runs `alembic upgrade head` before starting. Schema migrations, warehouse seeding, and business endpoints will be introduced in subsequent milestones.
+The API container runs `alembic upgrade head` before starting.
+
+## Database schema
+
+The initial Alembic migration creates the inventory persistence model: products, warehouses, stock levels, holds, orders, and supplier synchronization runs. It has been tested with a full local PostgreSQL upgrade, downgrade to base, and re-upgrade.
+
+Run migrations manually inside the API service with:
+
+```sh
+docker compose exec api alembic upgrade head
+```
+
+## Supplier synchronization
+
+`POST /sync/products` fetches every DummyJSON product page, retries transient supplier failures, and upserts catalogue fields using the supplier product ID. Re-running unchanged supplier data creates a new audit run but does not update products. This phase deliberately does not create or adjust stock levels; that happens with the two-warehouse distribution phase.
+
+You can also invoke the same service from the running API container:
+
+```sh
+docker compose exec api python scripts/sync_products.py
+```
 
 ## Planned checks
 
 ```sh
-uv run ruff check .
-uv run mypy src
-uv run pytest
+ruff check .
+mypy app
+pytest
 ```
 
 ## Key inventory rule

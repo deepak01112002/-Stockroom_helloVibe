@@ -8,7 +8,9 @@ Stockroom is a FastAPI service with PostgreSQL as the authoritative inventory st
 
 Exactly two warehouses are seeded: `warehouse-a` (Warehouse A) and `warehouse-b` (Warehouse B). Supplier stock is split deterministically: Warehouse A receives `ceil(total / 2)` and Warehouse B receives `floor(total / 2)`.
 
-A hold will reserve one product from one warehouse. For every future `StockLevel`, `available = on_hand - held - sold` and a database check constraint will enforce `held + sold <= on_hand`.
+A hold will reserve one product from one warehouse. The initial migration now creates `Product`, `Warehouse`, `StockLevel`, `Hold`, `Order`, and `SyncRun` tables. Every `StockLevel` has `available = on_hand - held - sold`; the database check constraint enforces `held + sold <= on_hand`.
+
+`Hold` and `Order` use composite foreign keys to `StockLevel(product_id, warehouse_id)`. This makes an allocation explicitly belong to a real product-and-warehouse stock row, rather than allowing mismatched IDs. `Hold` also has a unique `(client_id, idempotency_key)` constraint for the later create-hold API.
 
 ## Transactions and locks
 
@@ -24,7 +26,9 @@ Payment webhooks will verify an HMAC over the raw request body. Event recording,
 
 ## Supplier sync and rate limits
 
-DummyJSON sync will use HTTP timeouts and bounded exponential retries. Product work will run independently; a stock reconciliation error will be recorded in `SyncRun` and will not stop later products. Incoming stock that would violate the inventory invariant will not be applied.
+DummyJSON sync uses HTTPX timeouts and bounded exponential retries for transport errors and 5xx responses. It follows the supplier's `limit`/`skip` pagination and persists only catalogue fields in this phase. Each product upsert runs in a nested transaction: an invalid product is recorded in `SyncRun` and does not stop later products. Stock reconciliation is deferred to the two-warehouse distribution phase; incoming supplier stock is not yet applied to `StockLevel`.
+
+`POST /sync/products` and `python scripts/sync_products.py` use the same service. Products are keyed by supplier ID; unchanged source data creates an audit run but does not update catalogue rows.
 
 Hold creation will be limited per `X-Client-Id` using PostgreSQL minute buckets, which makes the limit shared across API instances. The initial policy is 30 hold requests per client per minute.
 

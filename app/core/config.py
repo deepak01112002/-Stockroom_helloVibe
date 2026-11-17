@@ -17,6 +17,10 @@ class Settings(BaseSettings):
         description="Safe local-development PostgreSQL connection URL.",
     )
     log_level: str = "INFO"
+    supplier_base_url: str = "https://dummyjson.com"
+    supplier_timeout_seconds: float = Field(default=5.0, gt=0, le=60)
+    supplier_max_retries: int = Field(default=3, ge=0, le=5)
+    supplier_page_size: int = Field(default=50, ge=1, le=100)
 
 
 @lru_cache
