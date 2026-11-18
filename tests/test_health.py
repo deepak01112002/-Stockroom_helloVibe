@@ -26,6 +26,17 @@ def test_health_reports_database_status() -> None:
 
     assert response.status_code == 200
     assert response.json() == {"status": "ok", "database": "ok"}
+    assert response.headers["X-Request-ID"]
+
+
+def test_health_preserves_valid_caller_request_id() -> None:
+    app.dependency_overrides[get_db_session] = lambda: HealthySession()
+    try:
+        response = TestClient(app).get("/health", headers={"X-Request-ID": "request-123"})
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.headers["X-Request-ID"] == "request-123"
 
 
 def test_health_returns_503_when_database_is_down() -> None:
@@ -36,4 +47,6 @@ def test_health_returns_503_when_database_is_down() -> None:
         app.dependency_overrides.clear()
 
     assert response.status_code == 503
-    assert response.json() == {"detail": "database unavailable"}
+    assert response.json()["error"]["code"] == "http_error"
+    assert response.json()["error"]["message"] == "database unavailable"
+    assert response.json()["error"]["request_id"]

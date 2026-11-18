@@ -89,49 +89,89 @@ class InventoryService:
     def confirm_hold(self, hold_id: uuid.UUID) -> Order:
         with self._session.begin():
             hold = self._lock_hold(hold_id)
-            if hold.status is HoldStatus.CONFIRMED:
-                order = self._session.scalar(select(Order).where(Order.hold_id == hold.id))
-                if order is None:
-                    raise InventoryError("confirmed hold has no order")
-                return order
-            if hold.status is not HoldStatus.ACTIVE:
-                raise HoldStateError(f"hold is {hold.status.value} and cannot be confirmed")
-            if self._is_expired(hold):
-                raise HoldExpiredError("hold has expired and awaits release by the expiry worker")
-
-            stock_level = self._lock_stock_level(hold.product_id, hold.warehouse_id)
-            if stock_level.held < hold.quantity:
-                raise InventoryError("stock level held quantity is inconsistent with the hold")
-            stock_level.held -= hold.quantity
-            stock_level.sold += hold.quantity
-            hold.status = HoldStatus.CONFIRMED
-            hold.finalized_at = datetime.now(UTC)
-            order = Order(
-                hold_id=hold.id,
-                product_id=hold.product_id,
-                warehouse_id=hold.warehouse_id,
-                quantity=hold.quantity,
-            )
-            self._session.add(order)
-            self._session.flush()
-            return order
+            return self._confirm_locked_hold(hold)
 
     def cancel_hold(self, hold_id: uuid.UUID) -> Hold:
         with self._session.begin():
             hold = self._lock_hold(hold_id)
-            if hold.status is HoldStatus.CANCELLED:
-                return hold
-            if hold.status is not HoldStatus.ACTIVE:
-                raise HoldStateError(f"hold is {hold.status.value} and cannot be cancelled")
+            return self._cancel_locked_hold(hold)
 
-            stock_level = self._lock_stock_level(hold.product_id, hold.warehouse_id)
-            if stock_level.held < hold.quantity:
-                raise InventoryError("stock level held quantity is inconsistent with the hold")
-            stock_level.held -= hold.quantity
-            hold.status = HoldStatus.CANCELLED
-            hold.finalized_at = datetime.now(UTC)
+    def expire_due_holds(self, batch_size: int) -> list[Hold]:
+        """Claim and release a bounded batch of due holds in one transaction.
+
+        PostgreSQL's SKIP LOCKED lets multiple worker instances operate without
+        waiting on, or duplicating, each other's claimed holds.
+        """
+
+        with self._session.begin():
+            now = datetime.now(UTC)
+            holds = list(
+                self._session.scalars(
+                    select(Hold)
+                    .where(Hold.status == HoldStatus.ACTIVE, Hold.expires_at <= now)
+                    .order_by(Hold.expires_at, Hold.id)
+                    .limit(batch_size)
+                    .with_for_update(skip_locked=True)
+                )
+            )
+            for hold in holds:
+                self._expire_locked_hold(hold)
             self._session.flush()
+            return holds
+
+    def _confirm_locked_hold(self, hold: Hold) -> Order:
+        if hold.status is HoldStatus.CONFIRMED:
+            order = self._session.scalar(select(Order).where(Order.hold_id == hold.id))
+            if order is None:
+                raise InventoryError("confirmed hold has no order")
+            return order
+        if hold.status is not HoldStatus.ACTIVE:
+            raise HoldStateError(f"hold is {hold.status.value} and cannot be confirmed")
+        if self._is_expired(hold):
+            raise HoldExpiredError("hold has expired and awaits release by the expiry worker")
+
+        stock_level = self._lock_stock_level(hold.product_id, hold.warehouse_id)
+        if stock_level.held < hold.quantity:
+            raise InventoryError("stock level held quantity is inconsistent with the hold")
+        stock_level.held -= hold.quantity
+        stock_level.sold += hold.quantity
+        hold.status = HoldStatus.CONFIRMED
+        hold.finalized_at = datetime.now(UTC)
+        order = Order(
+            hold_id=hold.id,
+            product_id=hold.product_id,
+            warehouse_id=hold.warehouse_id,
+            quantity=hold.quantity,
+        )
+        self._session.add(order)
+        self._session.flush()
+        return order
+
+    def _cancel_locked_hold(self, hold: Hold) -> Hold:
+        if hold.status is HoldStatus.CANCELLED:
             return hold
+        if hold.status is not HoldStatus.ACTIVE:
+            raise HoldStateError(f"hold is {hold.status.value} and cannot be cancelled")
+
+        stock_level = self._lock_stock_level(hold.product_id, hold.warehouse_id)
+        if stock_level.held < hold.quantity:
+            raise InventoryError("stock level held quantity is inconsistent with the hold")
+        stock_level.held -= hold.quantity
+        hold.status = HoldStatus.CANCELLED
+        hold.finalized_at = datetime.now(UTC)
+        self._session.flush()
+        return hold
+
+    def _expire_locked_hold(self, hold: Hold) -> Hold:
+        if hold.status is not HoldStatus.ACTIVE:
+            return hold
+        stock_level = self._lock_stock_level(hold.product_id, hold.warehouse_id)
+        if stock_level.held < hold.quantity:
+            raise InventoryError("stock level held quantity is inconsistent with the hold")
+        stock_level.held -= hold.quantity
+        hold.status = HoldStatus.EXPIRED
+        hold.finalized_at = datetime.now(UTC)
+        return hold
 
     def _lock_stock_level(self, product_id: uuid.UUID, warehouse_id: uuid.UUID) -> StockLevel:
         stock_level = self._session.scalar(

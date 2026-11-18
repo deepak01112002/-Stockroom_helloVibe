@@ -14,12 +14,27 @@ from app.services.inventory import (
     InventoryNotFoundError,
     InventoryService,
 )
+from app.services.rate_limits import RateLimitExceededError, RateLimitService
 
 router = APIRouter(prefix="/holds", tags=["holds"])
 DatabaseSession = Annotated[Session, Depends(get_db_session)]
 ApplicationSettings = Annotated[Settings, Depends(get_settings)]
 ClientId = Annotated[str, Header(alias="X-Client-Id", min_length=1, max_length=128)]
 IdempotencyKey = Annotated[str, Header(alias="Idempotency-Key", min_length=1, max_length=255)]
+
+
+def enforce_hold_rate_limit(
+    session: DatabaseSession, settings: ApplicationSettings, client_id: ClientId
+) -> None:
+    try:
+        rate_limiter = RateLimitService(session, settings.hold_rate_limit_per_minute)
+        rate_limiter.consume_hold_request(client_id)
+    except RateLimitExceededError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail={"code": "rate_limit_exceeded", "message": str(exc)},
+            headers={"Retry-After": str(exc.retry_after_seconds)},
+        ) from exc
 
 
 @router.post("", response_model=HoldResponse, status_code=status.HTTP_201_CREATED)
@@ -29,6 +44,7 @@ def create_hold(
     settings: ApplicationSettings,
     client_id: ClientId,
     idempotency_key: IdempotencyKey,
+    _: Annotated[None, Depends(enforce_hold_rate_limit)],
 ) -> HoldResponse:
     """Reserve stock in one warehouse for the configured hold duration."""
 

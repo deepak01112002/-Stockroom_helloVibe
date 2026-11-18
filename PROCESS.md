@@ -22,6 +22,27 @@
 1. “Before writing any code, design the Stockroom application.” This established the architecture and its trade-offs before implementation.
 2. “Validate this point also before moving forward.” This fixed the two-warehouse split, lock order, webhook retry semantics, and per-product sync isolation.
 3. “PLEASE IMPLEMENT THIS PLAN.” This authorized the first incremental implementation task.
+4. “Review PROCESS.md, PROJECT_GUIDE.md, README.md, and the current codebase.” This authorized the final gap audit, shared rate limiting, request-ID logging, CI, and complete PostgreSQL verification.
+5. “As per Document and plan audit the entire current repository.” This authorized the assignment-PDF audit, automatic startup seeding, assignment webhook contract, normalized errors, and Azure design expansion.
+
+## Time accounting
+
+Exact elapsed time was not recorded per phase while this repository was built,
+so inventing retrospective hours would be misleading. The assignment's 6-8
+hour target is therefore **not claimed as verified**. The phase entries below
+record the actual implementation and validation work performed; a future
+submission should add stopwatch-based elapsed times at the end of each phase.
+
+## AI usage and intentional scope limits
+
+- AI was used for architecture review, typed Python implementation, test
+  design, documentation, and command orchestration. All reported command
+  results were executed and observed in this workspace.
+- No Git commits were created automatically because the user explicitly
+  prohibited automatic commits, even though the assignment asks for commit
+  history.
+- Azure resources were intentionally not provisioned; `DESIGN.md` is a
+  production design, while the deliverable remains Docker Compose as requested.
 
 ## Implementation and verification log
 
@@ -103,3 +124,55 @@
 - Ran `mypy app`: passed with no issues.
 - Ran `pytest`: 13 passed; one Starlette/HTTPX deprecation warning from `fastapi.testclient`.
 - Rebuilt the Python 3.12 API container. Real create/replay returned the same hold; real confirm/replay returned the same order and changed the stock row to held 0, sold 2. A separate real hold/cancel/replay returned the same cancelled hold and left held 0, sold 2.
+
+### Phase 6 - PostgreSQL concurrency proof - 2026-11-18
+
+- Added a `postgres`-marked integration test and a profile-gated Docker Compose test runner. The test targets the running FastAPI API over HTTP and inspects PostgreSQL directly after the requests finish.
+- The test creates isolated stock with three available units, releases 50 concurrent one-unit requests using unique idempotency keys, and asserts three `201` responses and 47 `409 insufficient_inventory` responses.
+- It verifies the final row is `on_hand=3`, `held=3`, `sold=0`, verifies three active holds totaling three units, and removes its dedicated fixture product afterward.
+- The normal local suite skips this test unless `API_BASE_URL` and `TEST_DATABASE_URL` are supplied, preventing accidental use of a non-PostgreSQL test database.
+- Ran `ruff check .`: passed.
+- Ran `mypy app`: passed with no issues.
+- Ran local `pytest`: 13 passed, 1 skipped, with one Starlette/HTTPX deprecation warning from `fastapi.testclient`.
+- Ran `docker compose --profile test run --rm test` in Python 3.12: 1 PostgreSQL concurrency test passed, 13 non-marked tests deselected, with the same upstream deprecation warning.
+
+### Phase 7 - hold expiry and payment webhooks - 2026-11-18
+
+- Added `PaymentEvent` and the reversible `20261118_0002_add_payment_events` Alembic migration. Provider event IDs are unique; the event stores a payload hash, outcome, processing result, and completion timestamp.
+- Added the Compose expiry worker. Each bounded scan claims due active holds with `FOR UPDATE SKIP LOCKED`, then locks/release their stock in the approved Hold-to-StockLevel order within one transaction. A worker crash before commit leaves no committed change and another worker can claim the hold.
+- Configured the Compose worker with `restart: unless-stopped`, so an unexpected worker-process crash is restarted and can reclaim rolled-back expiry work.
+- Added `POST /webhooks/payments`. It verifies an HMAC-SHA256 signature over the raw body, records the unique event, processes the hold state in the same transaction, and safely acknowledges matching duplicate events. HMAC secrets are configured only through `PAYMENT_WEBHOOK_SECRET` and are not logged.
+- Removed the temporary Compose development-secret value before handoff. Compose now requires `PAYMENT_WEBHOOK_SECRET` from `.env` or the environment; no webhook secret is stored in tracked configuration.
+- Payment success confirms active holds, payment failure cancels them, and late success records an expiry result without creating an order. A provider event ID reused with different payload bytes is rejected with `409`.
+- Added local tests for expiry release/idempotency and signed webhook success/replay/failure/late-event behavior. Added a PostgreSQL lifecycle integration test which starts two concurrent worker batches against ten expired holds and verifies exactly ten releases, then drives webhook flows through the Compose API.
+- The first PostgreSQL lifecycle assertion counted orders from pre-existing development data. The implementation was correct; scoping the assertion to the fixture product fixed the test isolation issue.
+- Ran `ruff check .`: passed.
+- Ran `mypy app`: passed with no issues.
+- Ran local `pytest`: 15 passed, 2 skipped, with one Starlette/HTTPX deprecation warning from `fastapi.testclient`.
+- Ran `docker compose --profile test run --rm test` after a no-cache test-image rebuild: 2 PostgreSQL tests passed, 15 non-marked tests deselected, with the same upstream deprecation warning.
+
+### Phase 8 - shared rate limits, observability, and delivery checks - 2026-11-18
+
+- Added a PostgreSQL `rate_limit_buckets` table and reversible migration. Hold creation now uses a conditional PostgreSQL upsert keyed by client/minute, giving all API instances the same 30-request default limit without process-local state.
+- Added request-ID middleware. It preserves a caller-provided `X-Request-ID` or generates one, returns it in the response, and binds it to structured application logs.
+- Added `DESIGN.md` and GitHub Actions CI for Ruff, mypy, pytest, Compose validation, and the PostgreSQL Compose suite.
+- Corrected the guide’s stale pre-worker wording and documented the operational rate-limit/request-ID behavior.
+- Ran `ruff check .`: passed.
+- Ran `mypy app`: passed with no issues.
+- Ran local `pytest`: 16 passed, 3 skipped, with one Starlette/HTTPX deprecation warning from `fastapi.testclient`.
+- Ran `docker compose --profile test run --rm test` after verifying collection of all integration tests: 3 PostgreSQL tests passed, 16 non-marked tests deselected, with the same upstream deprecation warning. The suite included a live DummyJSON synchronization and all required runtime flows.
+
+### Phase 9 - assignment-PDF completion audit - 2026-11-18
+
+- Compared the repository against the supplied assignment PDF. The audit found automatic Compose data bootstrap, assignment event names, signed-webhook script, a uniform validation/error envelope, and the Azure/festival-sale design detail still incomplete.
+- Updated startup so the API runs migrations then synchronizes DummyJSON before serving; if the supplier cannot be reached, it inserts a deterministic fallback catalogue item. This was chosen to make a clean machine usable without hiding supplier outages.
+- Changed the webhook request contract to `event: payment.succeeded|payment.failed` and added the runnable signing script. The internal persisted outcome remains a compact `succeeded|failed` enum.
+- Added common error handling for `HTTPException` and FastAPI validation errors. A validation test caught that old test expectations still referenced FastAPI's `detail` shape; those tests were updated to the documented envelope.
+- Expanded `DESIGN.md` with Azure Container Apps, Azure Database for PostgreSQL, Service Bus before asynchronous webhook business processing, Key Vault, and a 500 holds/second contention analysis.
+- Ran `ruff check .`: passed.
+- Ran `mypy app scripts`: passed with no issues in 34 source files.
+- Ran local `pytest`: 18 passed, 3 skipped, with one upstream Starlette/TestClient deprecation warning.
+- Ran Docker Compose configuration validation: passed.
+- Ran Docker/PostgreSQL integration and E2E suite: 3 passed, 18 non-marked tests deselected, with the same upstream warning. It covered sync, listing, holds/idempotency/confirm/cancel, concurrency, expiry, assignment webhook events/replay, and rate limiting.
+- Ran a disposable PostgreSQL database through `alembic upgrade head`, `alembic downgrade base`, and `alembic upgrade head`: all revisions completed successfully; the disposable database was dropped afterward.
+- Ran the exact documented `docker compose up --build` startup path. It logged a completed 194-product bootstrap; PostgreSQL reported two warehouses and 388 stock levels, and `/health` returned database OK.

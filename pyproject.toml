@@ -53,3 +53,4 @@ mypy_path = "."
 testpaths = ["tests"]
 addopts = "-q"
 pythonpath = ["."]
+markers = ["postgres: requires the Docker Compose PostgreSQL integration environment"]

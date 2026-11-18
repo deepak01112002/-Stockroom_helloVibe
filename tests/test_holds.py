@@ -69,14 +69,14 @@ def test_hold_creation_idempotency_confirmation_and_cancellation() -> None:
     assert replayed.status_code == 201
     assert replayed.json()["id"] == created.json()["id"]
     assert conflict.status_code == 409
-    assert conflict.json()["detail"]["code"] == "idempotency_conflict"
+    assert conflict.json()["error"]["code"] == "idempotency_conflict"
     assert order.status_code == 200
     assert replayed_order.status_code == 200
     assert replayed_order.json()["id"] == order.json()["id"]
     assert cancelled.json()["status"] == "cancelled"
     assert replayed_cancel.json()["status"] == "cancelled"
     assert insufficient.status_code == 409
-    assert insufficient.json()["detail"]["code"] == "insufficient_inventory"
+    assert insufficient.json()["error"]["code"] == "insufficient_inventory"
 
     with Session(engine) as session:
         stock_level = session.get(StockLevel, stock_level_id)

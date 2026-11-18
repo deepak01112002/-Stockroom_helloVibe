@@ -27,10 +27,25 @@ class HoldStatus(enum.StrEnum):
     EXPIRED = "expired"
 
 
+class PaymentOutcome(enum.StrEnum):
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+
+
+class PaymentEventType(enum.StrEnum):
+    SUCCEEDED = "payment.succeeded"
+    FAILED = "payment.failed"
+
+
 HOLD_STATUS_ENUM = Enum(
     HoldStatus,
     name="hold_status",
     values_callable=lambda status_enum: [status.value for status in status_enum],
+)
+PAYMENT_OUTCOME_ENUM = Enum(
+    PaymentOutcome,
+    name="payment_outcome",
+    values_callable=lambda outcome_enum: [outcome.value for outcome in outcome_enum],
 )
 
 
@@ -124,6 +139,33 @@ class Order(Base):
     warehouse_id: Mapped[uuid.UUID] = mapped_column()
     quantity: Mapped[int] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class PaymentEvent(Base):
+    __tablename__ = "payment_events"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    provider_event_id: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    hold_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("holds.id", ondelete="RESTRICT"))
+    outcome: Mapped[PaymentOutcome] = mapped_column(PAYMENT_OUTCOME_ENUM)
+    payload_hash: Mapped[str] = mapped_column(String(64))
+    processing_result: Mapped[str] = mapped_column(String(64))
+    processed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class RateLimitBucket(Base):
+    __tablename__ = "rate_limit_buckets"
+    __table_args__ = (
+        UniqueConstraint("client_id", "window_start", name="client_window"),
+        CheckConstraint("request_count >= 0", name="non_negative_request_count"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    client_id: Mapped[str] = mapped_column(String(128))
+    window_start: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    request_count: Mapped[int] = mapped_column(Integer, default=0)
 
 
 class SyncRun(Base):

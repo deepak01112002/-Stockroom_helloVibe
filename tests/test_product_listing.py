@@ -101,3 +101,6 @@ def test_products_validate_pagination_parameters() -> None:
     response = TestClient(app).get("/products?page=0&page_size=101")
 
     assert response.status_code == 422
+    assert response.json()["error"]["code"] == "validation_error"
+    assert response.json()["error"]["message"] == "request validation failed"
+    assert response.json()["error"]["details"]
