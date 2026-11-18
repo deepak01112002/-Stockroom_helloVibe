@@ -67,3 +67,39 @@
 - Ran `mypy app`: passed with no issues.
 - Ran `pytest`: 8 passed; one Starlette/HTTPX deprecation warning from `fastapi.testclient`.
 - Rebuilt the Python 3.12 API container. Real `POST /sync/products` created 194 products with zero errors; an immediate second run created and updated zero products. The CLI was also run successfully and created/updated zero products.
+
+### Phase 3 - two-warehouse stock distribution - 2026-11-18
+
+- Added idempotent seeding for exactly `warehouse-a` (Warehouse A) and `warehouse-b` (Warehouse B), including `scripts/seed_warehouses.py`.
+- Extended supplier synchronization to create or reconcile two stock rows per product. Warehouse A receives `(stock + 1) // 2`; Warehouse B receives `stock // 2`.
+- Existing stock rows are locked before reconciliation. If an incoming target is below that row's `held + sold`, the product transaction rolls back, an error is recorded in `SyncRun`, and later products continue.
+- Added tests for even and odd distribution, exact seeded warehouses, repeat-sync idempotency, and continuing after a stock-reconciliation error.
+- The first test run had one assertion-conversion error when building a dictionary from a SQLAlchemy result. The implementation was unaffected; materializing rows with `.all()` fixed the test.
+- Ran `ruff check .`: passed.
+- Ran `mypy app`: passed with no issues.
+- Ran `pytest`: 10 passed; one Starlette/HTTPX deprecation warning from `fastapi.testclient`.
+- Rebuilt the Python 3.12 API container. Real synchronization updated 194 existing products to add stock levels, and a second run made zero updates. PostgreSQL confirmed exactly two warehouses, 194 stock rows per warehouse, and zero products whose two stock totals differed by more than one.
+
+### Phase 4 - product catalogue API - 2026-11-18
+
+- Added `GET /products` with exact category filtering, aggregate in-stock/out-of-stock filtering, and one-based pagination (page size 1-100).
+- Implemented availability in SQL as the sum of `on_hand - held - sold` across warehouse rows, rather than trusting an application-side cache.
+- Returns active products in stable title/ID order and includes `available_quantity`, page metadata, and total counts.
+- Added API tests covering category filtering, in-stock and out-of-stock filtering, aggregation across two warehouses, pagination, and invalid pagination parameters.
+- The first test run found an assertion using an expired SQLAlchemy instance after its setup session closed. Capturing the UUID before closing the setup session fixed the test; endpoint behavior was unaffected.
+- Ran `ruff check .`: passed.
+- Ran `mypy app`: passed with no issues.
+- Ran `pytest`: 12 passed; one Starlette/HTTPX deprecation warning from `fastapi.testclient`.
+- Rebuilt the Python 3.12 API container and verified `GET /products?category=beauty&in_stock=true&page=1&page_size=3` returned a paginated response with 3 items, total 5, and total pages 2.
+
+### Phase 5 - transactional holds and orders - 2026-11-18
+
+- Added create, confirm, and cancel hold endpoints plus typed request/response schemas.
+- Hold creation locks one stock row and atomically increments `held` while inserting the hold. Idempotency uses the client/key unique constraint plus a canonical request hash; matching replays return the first hold and conflicting payloads return 409.
+- Confirmation and cancellation lock Hold before StockLevel. Confirmation moves quantity from held to sold and inserts the unique order; cancellation returns held stock. Both actions are safe to retry.
+- Added API tests for idempotent create, conflicting key reuse, confirm replay, cancel replay, and insufficient inventory.
+- The first real PostgreSQL hold request failed because SQLAlchemy bound the Python enum name `ACTIVE`, while the migration's PostgreSQL enum contains the value `active`. The transaction rolled back with no stock change. Configured the ORM enum to persist enum values, then reran verification successfully.
+- Ran `ruff check .`: passed.
+- Ran `mypy app`: passed with no issues.
+- Ran `pytest`: 13 passed; one Starlette/HTTPX deprecation warning from `fastapi.testclient`.
+- Rebuilt the Python 3.12 API container. Real create/replay returned the same hold; real confirm/replay returned the same order and changed the stock row to held 0, sold 2. A separate real hold/cancel/replay returned the same cancelled hold and left held 0, sold 2.

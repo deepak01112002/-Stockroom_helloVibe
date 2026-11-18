@@ -27,6 +27,13 @@ class HoldStatus(enum.StrEnum):
     EXPIRED = "expired"
 
 
+HOLD_STATUS_ENUM = Enum(
+    HoldStatus,
+    name="hold_status",
+    values_callable=lambda status_enum: [status.value for status in status_enum],
+)
+
+
 class Product(Base):
     __tablename__ = "products"
 
@@ -92,9 +99,7 @@ class Hold(Base):
     idempotency_key: Mapped[str] = mapped_column(String(255))
     request_hash: Mapped[str] = mapped_column(String(64))
     quantity: Mapped[int] = mapped_column(Integer)
-    status: Mapped[HoldStatus] = mapped_column(
-        Enum(HoldStatus, name="hold_status"), default=HoldStatus.ACTIVE
-    )
+    status: Mapped[HoldStatus] = mapped_column(HOLD_STATUS_ENUM, default=HoldStatus.ACTIVE)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     finalized_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

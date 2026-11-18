@@ -14,14 +14,19 @@ from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from app.db.models import Product, SyncRun
+from app.db.models import Product, StockLevel, SyncRun, Warehouse
 from app.schemas.supplier import SupplierProduct, SupplierProductsPage
+from app.services.warehouses import ensure_seed_warehouses
 
 PRODUCT_FIELDS = "id,title,description,category,price,stock"
 
 
 class SupplierSyncError(RuntimeError):
     """Raised when a supplier page cannot be retrieved safely."""
+
+
+class StockReconciliationError(RuntimeError):
+    """Raised when incoming supplier stock would invalidate an existing allocation."""
 
 
 class ProductPageSource(Protocol):
@@ -99,6 +104,7 @@ class SupplierSyncService:
         self._session.add(sync_run)
         self._session.flush()
         errors: list[str] = []
+        warehouses = ensure_seed_warehouses(self._session)
 
         try:
             for raw_product in self._source.iter_products():
@@ -106,8 +112,17 @@ class SupplierSyncService:
                 try:
                     product = SupplierProduct.model_validate(raw_product)
                     with self._session.begin_nested():
-                        self._upsert_product(product, sync_run)
-                except (ValidationError, SQLAlchemyError) as exc:
+                        persisted_product, created, catalogue_changed = self._upsert_product(
+                            product
+                        )
+                        stock_changed = self._reconcile_stock_levels(
+                            persisted_product, product.stock, warehouses
+                        )
+                    if created:
+                        sync_run.products_created += 1
+                    elif catalogue_changed or stock_changed:
+                        sync_run.products_updated += 1
+                except (StockReconciliationError, ValidationError, SQLAlchemyError) as exc:
                     sync_run.errors_count += 1
                     errors.append(f"product {raw_product.get('id', 'unknown')}: {exc}")
 
@@ -122,24 +137,23 @@ class SupplierSyncService:
         self._session.flush()
         return sync_run
 
-    def _upsert_product(self, source: SupplierProduct, sync_run: SyncRun) -> None:
+    def _upsert_product(self, source: SupplierProduct) -> tuple[Product, bool, bool]:
         supplier_id = str(source.id)
         product = self._session.scalar(select(Product).where(Product.supplier_id == supplier_id))
         price_cents = self._price_to_cents(source.price)
 
         if product is None:
-            self._session.add(
-                Product(
-                    supplier_id=supplier_id,
-                    title=source.title,
-                    description=source.description,
-                    category=source.category,
-                    price_cents=price_cents,
-                    active=True,
-                )
+            product = Product(
+                supplier_id=supplier_id,
+                title=source.title,
+                description=source.description,
+                category=source.category,
+                price_cents=price_cents,
+                active=True,
             )
-            sync_run.products_created += 1
-            return
+            self._session.add(product)
+            self._session.flush()
+            return product, True, True
 
         incoming = (source.title, source.description, source.category, price_cents, True)
         current = (
@@ -157,7 +171,59 @@ class SupplierSyncService:
                 product.price_cents,
                 product.active,
             ) = incoming
-            sync_run.products_updated += 1
+            return product, False, True
+        return product, False, False
+
+    def _reconcile_stock_levels(
+        self, product: Product, supplier_stock: int, warehouses: dict[str, Warehouse]
+    ) -> bool:
+        """Set two warehouse totals without ever reducing on-hand below allocated inventory."""
+
+        targets = {
+            "warehouse-a": (supplier_stock + 1) // 2,
+            "warehouse-b": supplier_stock // 2,
+        }
+        warehouse_ids = [warehouse.id for warehouse in warehouses.values()]
+        existing_levels = list(
+            self._session.scalars(
+                select(StockLevel)
+                .where(
+                    StockLevel.product_id == product.id,
+                    StockLevel.warehouse_id.in_(warehouse_ids),
+                )
+                .order_by(StockLevel.warehouse_id)
+                .with_for_update()
+            )
+        )
+        levels_by_warehouse_id = {level.warehouse_id: level for level in existing_levels}
+
+        for code, target in targets.items():
+            existing_level = levels_by_warehouse_id.get(warehouses[code].id)
+            if existing_level is not None and target < existing_level.held + existing_level.sold:
+                raise StockReconciliationError(
+                    f"incoming stock target for {code} ({target}) is below "
+                    f"allocated inventory ({existing_level.held + existing_level.sold})"
+                )
+
+        changed = False
+        for code, target in targets.items():
+            warehouse = warehouses[code]
+            stock_level = levels_by_warehouse_id.get(warehouse.id)
+            if stock_level is None:
+                self._session.add(
+                    StockLevel(
+                        product_id=product.id,
+                        warehouse_id=warehouse.id,
+                        on_hand=target,
+                        held=0,
+                        sold=0,
+                    )
+                )
+                changed = True
+            elif stock_level.on_hand != target:
+                stock_level.on_hand = target
+                changed = True
+        return changed
 
     @staticmethod
     def _price_to_cents(price: Decimal) -> int:
